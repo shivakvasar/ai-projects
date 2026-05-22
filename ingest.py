@@ -46,12 +46,12 @@ def load_headers(filepath: str) -> tuple[list[str], dict]:
     suffix = Path(filepath).suffix.lower()
 
     # Pick the right pandas reader based on the extension.
-    # nrows=50 says "only read the first 50 rows" — we don't need the whole file
+    # nrows=5 says "only read the first 5 rows" — we don't need the whole file
     # just to look at column names and a few sample values.
     if suffix in (".xlsx", ".xls"):
-        df = pd.read_excel(filepath, nrows=50)
+        df = pd.read_excel(filepath, nrows=5)
     elif suffix == ".csv":
-        df = pd.read_csv(filepath, nrows=50)
+        df = pd.read_csv(filepath, nrows=5)
     else:
         # "raise" stops execution and reports an error. !r prints the value with quotes
         # around it, so the user sees: Unsupported file extension: '.txt'
