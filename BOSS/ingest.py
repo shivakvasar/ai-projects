@@ -23,7 +23,7 @@ MAX_TOKENS = 1024             # Upper limit on how many tokens (~words) Claude c
 # This is the "system prompt" — instructions Claude reads before every user message.
 SYSTEM_PROMPT = """You are a data mapper. Given CSV headers and sample values, return a JSON array mapping each source column to a canonical field.
 
-Canonical fields: Customer, Job, Invoice, Payment, Task, Vendor, Unknown
+Canonical fields: Customer, Job, Invoice, Payment, Task, Vendor, Supplier, SupplierID, Unknown
 
 Return ONLY a JSON array. No explanation. Each item must have:
 - "source_column": the original header name

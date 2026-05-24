@@ -104,4 +104,4 @@ print_output(parsed, args.format)
 # Save the output to a JSON file
 if args.save:
     save_output(parsed, OUTPUT_FILENAME)
-    print(f"Output saved to {OUTPUT_FILENAME}")  
+    print(f"Output saved to {OUTPUT_FILENAME}")
