@@ -12,7 +12,7 @@
   {
     "source_column": "job_ref",
     "canonical_field": "Job",
-    "confidence": 0.98,
+    "confidence": 0.95,
     "sample_values": [
       "JOB-0042",
       "JOB-0043",
@@ -32,7 +32,7 @@
   {
     "source_column": "amount_due",
     "canonical_field": "Invoice",
-    "confidence": 0.8,
+    "confidence": 0.85,
     "sample_values": [
       "4500.0",
       "12000.0",
@@ -57,26 +57,6 @@
       "BuildPro Supplies",
       "CoolTech Parts",
       "BuildPro Supplies"
-    ]
-  },
-  {
-    "source_column": "description",
-    "canonical_field": "Task",
-    "confidence": 0.7,
-    "sample_values": [
-      "Aircon servicing",
-      "Chiller maintenance",
-      "Filter replacement"
-    ]
-  },
-  {
-    "source_column": " id",
-    "canonical_field": "SupplierID",
-    "confidence": 0.9,
-    "sample_values": [
-      " S1234",
-      " S1235",
-      " S1236"
     ]
   }
 ]

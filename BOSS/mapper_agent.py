@@ -1,4 +1,4 @@
-"""Agent loop implementing tool-calling pattern for CSV/XLSX data mapping."""
+"""Agent loop implementing a tool-calling workflow for CSV/XLSX header mapping."""
 
 import json
 import os
@@ -7,17 +7,21 @@ from typing import Any
 import anthropic
 from dotenv import load_dotenv
 
+# Load environment variables from the .env file in the project root.
+# This makes values like ANTHROPIC_API_KEY available through os.getenv().
 load_dotenv()
 
-# Initialize Anthropic client
+# Create a global Anthropic Claude client once, using the API key from the env.
+# All subsequent calls in this script reuse this client.
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-# Tool definitions for the agent
+# Tool definitions exposed to the agent. Claude may request one of these tools by name.
+# Each tool includes a name, a description, and a JSON schema describing its input.
 TOOLS = [
     {
-        "name": "load_csv_headers",
+        "name": "load_headers",
         "description": (
-            "Load column headers and sample values from a CSV file. "
+            "Load column headers and sample values from a CSV or XLSX file. "
             "Returns the first 3 sample values for each column."
         ),
         "input_schema": {
@@ -25,50 +29,32 @@ TOOLS = [
             "properties": {
                 "filepath": {
                     "type": "string",
-                    "description": "Path to the CSV file to read",
+                    "description": "Path to the input file to read",
                 }
             },
             "required": ["filepath"],
         },
     },
     {
-        "name": "load_xlsx_headers",
+        "name": "inspect_column",
         "description": (
-            "Load column headers and sample values from an Excel file. "
-            "Returns the first 3 sample values for each column."
+            "Inspect a single column header and sample values, then return "
+            "a canonical field mapping with confidence."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "filepath": {
+                "header": {
                     "type": "string",
-                    "description": "Path to the XLSX file to read",
-                }
-            },
-            "required": ["filepath"],
-        },
-    },
-    {
-        "name": "map_to_canonical_fields",
-        "description": (
-            "Map source column headers to canonical fields using Claude. "
-            "Returns JSON with source_column, canonical_field, confidence, "
-            "and sample_values for each mapping."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "headers": {
+                    "description": "The column header name",
+                },
+                "sample_values": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of source column headers",
-                },
-                "samples": {
-                    "type": "object",
-                    "description": "Dict of column_name -> [sample_values]",
+                    "description": "Example values for the column",
                 },
             },
-            "required": ["headers", "samples"],
+            "required": ["header", "sample_values"],
         },
     },
     {
@@ -91,80 +77,131 @@ TOOLS = [
     },
 ]
 
+# The set of canonical fields that the inspection tool can map to.
+# When updating the mapping logic, add any new canonical values here.
+CANONICAL_FIELDS = [
+    "Customer",
+    "Job",
+    "Invoice",
+    "Payment",
+    "Task",
+    "Vendor",
+    "Supplier",
+    "SupplierID",
+    "Unknown",
+]
 
-def load_csv_headers(filepath: str) -> dict[str, Any]:
-    """Simulate loading CSV headers and samples."""
+# Read a file and extract the header names plus a few sample rows.
+# This tool supports both CSV and XLSX files and returns a schema-ready payload.
+def load_headers(filepath: str) -> dict[str, Any]:
+    """Read a CSV or Excel file and return column headers plus sample values."""
     try:
         import pandas as pd
 
-        df = pd.read_csv(filepath, nrows=5)
+        # Choose CSV versus Excel reading based on the file extension.
+        if filepath.lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(filepath, nrows=5)
+        else:
+            df = pd.read_csv(filepath, nrows=5)
+
+        # The agent only needs the first few rows for header inference.
+        # This is faster and avoids loading large datasets into memory.
         headers = df.columns.tolist()
         samples = {
             col: df[col].dropna().astype(str).tolist()[:3] for col in headers
         }
+
         return {"headers": headers, "samples": samples, "success": True}
     except Exception as e:
+        # If anything fails, return the error so the agent can continue gracefully.
         return {"error": str(e), "success": False}
 
-
-def load_xlsx_headers(filepath: str) -> dict[str, Any]:
-    """Simulate loading XLSX headers and samples."""
+# Inspect a single header and its sample values to determine the canonical field.
+# This tool is intended to be called repeatedly until a confident mapping is returned.
+def inspect_column(header: str, sample_values: list[str]) -> dict[str, Any]:
+    """Inspect a single column and return a canonical field mapping with confidence."""
     try:
-        import pandas as pd
-
-        df = pd.read_excel(filepath, nrows=5)
-        headers = df.columns.tolist()
-        samples = {
-            col: df[col].dropna().astype(str).tolist()[:3] for col in headers
-        }
-        return {"headers": headers, "samples": samples, "success": True}
+        # Keep retrying until we get a confident enough mapping.
+        return _inspect_column_until_confident(header, sample_values)
     except Exception as e:
+        # If the model or parsing fails, return the error instead of raising.
         return {"error": str(e), "success": False}
 
+# Retry the single-column inspection until the returned confidence is high enough.
+# This avoids accepting low-confidence mappings from Claude on the first attempt.
+def _inspect_column_until_confident(
+    header: str,
+    sample_values: list[str],
+    target_confidence: float = 0.8,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Retry inspecting a column until the confidence threshold is reached."""
+    last_result: dict[str, Any] = {"error": "No inspection attempt made.", "success": False}
 
-def map_to_canonical_fields(headers: list[str], samples: dict) -> dict[str, Any]:
-    """Call Claude to map headers to canonical fields."""
-    sample_text = "\n".join(
-        [f"- '{h}': {samples.get(h, [])}" for h in headers]
-    )
-    user_message = f"Map these columns to canonical fields:\n{sample_text}"
+    for attempt in range(1, max_attempts + 1):
+        # Attempt a single inspection and parse the result.
+        last_result = _inspect_column_once(header, sample_values, attempt, max_attempts)
 
+        # If the tool call itself failed, try again until the limit is reached.
+        if not last_result.get("success"):
+            continue
+
+        # Extract the numeric confidence from the returned mapping.
+        confidence = float(last_result["mapping"].get("confidence", 0.0))
+
+        # If we reached the target confidence, return success.
+        if confidence >= target_confidence:
+            return last_result
+
+    # If we exhaust retries, return the last result even if it is below threshold.
+    return last_result
+
+# Make a single Claude call for one column, then parse the JSON mapping response.
+def _inspect_column_once(
+    header: str,
+    sample_values: list[str],
+    attempt: int,
+    max_attempts: int,
+) -> dict[str, Any]:
+    """Call Claude once to inspect a single column and return a mapping."""
     system_message = (
-        "You are a data mapper. Given CSV headers and sample values, "
-        "return a JSON array mapping each source column to a canonical field.\n"
-        "Canonical fields: Customer, Job, Invoice, Payment, Task, Vendor, "
-        "Supplier, SupplierID, Unknown\n"
-        "Return ONLY a valid JSON array. Each item must have: "
-        "source_column, canonical_field, confidence (0.0-1.0), sample_values."
+        "You are a data mapper. Given a single column header and sample values, "
+        "return a JSON object with the best canonical field mapping.\n"
+        f"Canonical fields: {', '.join(CANONICAL_FIELDS)}\n"
+        "Return ONLY a valid JSON object with: source_column, canonical_field, confidence (0.0-1.0), sample_values."
     )
 
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=1024,
-            system=system_message,
-            messages=[{"role": "user", "content": user_message}],
-        )
+    # The user prompt includes the actual column header and sample values.
+    # The attempt count is included to make the retry behavior explicit in the prompt.
+    user_message = (
+        f"Inspect header '{header}' with sample values: {sample_values}. "
+        f"This is attempt {attempt} of {max_attempts}."
+    )
 
-        raw_text = response.content[0].text
-        # Strip markdown code fences if present
-        if raw_text.startswith("```"):
-            raw_text = (
-                raw_text.split("\n", 1)[1]
-                if "\n" in raw_text
-                else raw_text[3:]
-            )
-        if raw_text.endswith("```"):
-            raw_text = raw_text.rsplit("```", 1)[0]
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1024,
+        system=system_message,
+        messages=[{"role": "user", "content": user_message}],
+    )
 
-        mappings = json.loads(raw_text.strip())
-        return {"mappings": mappings, "success": True}
-    except Exception as e:
-        return {"error": str(e), "success": False}
+    raw_text = response.content[0].text
+    # Some responses include markdown code fences, so strip them before JSON parsing.
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("\n", 1)[1] if "\n" in raw_text else raw_text[3:]
+    if raw_text.endswith("```"):
+        raw_text = raw_text.rsplit("```", 1)[0]
 
+    mapping = json.loads(raw_text.strip())
+    # If the model returned a list, use the first object.
+    if isinstance(mapping, list) and mapping:
+        mapping = mapping[0]
 
+    return {"mapping": mapping, "success": True}
+
+# Save the final set of canonical mappings into a JSON file.
 def save_mappings(filepath: str, mappings: list) -> dict[str, Any]:
-    """Save mappings to a JSON file."""
+    """Write the mapping results to a JSON file."""
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(mappings, f, indent=2)
@@ -173,27 +210,27 @@ def save_mappings(filepath: str, mappings: list) -> dict[str, Any]:
             "message": f"Mappings saved to {filepath}",
         }
     except Exception as e:
+        # If writing fails, return the error instead of raising.
         return {"error": str(e), "success": False}
 
-
+# Route the tool request from Claude to the local Python helper function.
 def process_tool_call(tool_name: str, tool_input: dict) -> str:
-    """Execute a tool and return the result as a JSON string."""
-    if tool_name == "load_csv_headers":
-        result = load_csv_headers(tool_input["filepath"])
-    elif tool_name == "load_xlsx_headers":
-        result = load_xlsx_headers(tool_input["filepath"])
-    elif tool_name == "map_to_canonical_fields":
-        result = map_to_canonical_fields(
-            tool_input["headers"], tool_input["samples"]
+    """Dispatch tool calls from the agent to the matching Python helper."""
+    if tool_name == "load_headers":
+        result = load_headers(tool_input["filepath"])
+    elif tool_name == "inspect_column":
+        result = inspect_column(
+            tool_input["header"], tool_input["sample_values"]
         )
     elif tool_name == "save_mappings":
         result = save_mappings(tool_input["filepath"], tool_input["mappings"])
     else:
         result = {"error": f"Unknown tool: {tool_name}"}
 
+    # Always return a JSON string so the tool result can be fed back into the agent.
     return json.dumps(result)
 
-
+# Run the entire tool-calling agent loop until a final Claude response is returned.
 def agent_loop(user_message: str, max_iterations: int = 10) -> str:
     """
     Run the agentic loop with tool calling.
@@ -219,7 +256,8 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
         iteration += 1
         print(f"\n[Iteration {iteration}] Calling Claude...")
 
-        # Call Claude with tools
+        # Send the current conversation history and the tool definitions to Claude.
+        # Claude may return a tool use block if it wants to call one of our tools.
         response = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=4096,
@@ -227,15 +265,17 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
             messages=messages,
         )
 
-        # Check if we're done (no tool use blocks)
+        # If there are no more tool requests, Claude is giving a final response.
         if response.stop_reason == "end_turn":
-            # Extract the final text response
             for block in response.content:
                 if hasattr(block, "text"):
                     return block.text
 
-        # Process tool calls if present
+        # Otherwise, process any tool calls returned by Claude in the current response.
+        # Claude may request multiple tool invocations in a single response.
         tool_calls_made = False
+        tool_results = []
+
         for block in response.content:
             if block.type == "tool_use":
                 tool_calls_made = True
@@ -246,40 +286,44 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
                 print(f"  → Tool call: {tool_name}")
                 print(f"    Input: {json.dumps(tool_input, indent=2)}")
 
-                # Execute the tool
+                # Execute the requested tool and serialize the result.
                 tool_result = process_tool_call(tool_name, tool_input)
                 print(f"    Result: {tool_result}")
 
-                # Add assistant message and tool result to conversation
-                messages.append({"role": "assistant", "content": response.content})
-                messages.append(
+                tool_results.append(
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id,
-                                "content": tool_result,
-                            }
-                        ],
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": tool_result,
                     }
                 )
-                break  # Process one tool at a time; loop will call Claude again
 
-        # If no tool calls, we're done
+        if tool_results:
+            # Add the tool invocation message and the matching tool_result blocks.
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": tool_results,
+                }
+            )
+
+        # If Claude did not request any tool, return its text output.
         if not tool_calls_made:
             for block in response.content:
                 if hasattr(block, "text"):
                     return block.text
 
+    # If the loop reaches the maximum iteration count, return a safe fallback.
     return "Agent loop reached max iterations"
 
-
+# Demonstration entry point for running the agent with a fixed sample request.
 def main():
-    """Demo: use the agent to map a CSV file."""
+    """Demo entry point: run the agent loop with a sample request."""
+    # This demo request is intentionally simple: it asks the agent to use our tools.
     user_request = (
-        "Load the CSV file at BOSS/sample.csv, map the columns to canonical fields, "
-        "and save the results to BOSS/sample.mapped.json"
+        "Load the file at BOSS/sample.csv, inspect each column with available tools, "
+        "and save the mapping results to BOSS/sample.mapped.json"
     )
 
     print("=" * 70)
