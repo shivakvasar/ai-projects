@@ -2,7 +2,6 @@
   {
     "source_column": "client_name",
     "canonical_field": "Customer",
-    "confidence": 0.95,
     "sample_values": [
       "Tan Brothers Pte Ltd",
       "City Mall Management",
@@ -12,7 +11,6 @@
   {
     "source_column": "job_ref",
     "canonical_field": "Job",
-    "confidence": 0.95,
     "sample_values": [
       "JOB-0042",
       "JOB-0043",
@@ -22,7 +20,6 @@
   {
     "source_column": "date_issued",
     "canonical_field": "Invoice",
-    "confidence": 0.75,
     "sample_values": [
       "2026-04-01",
       "2026-04-03",
@@ -31,8 +28,7 @@
   },
   {
     "source_column": "amount_due",
-    "canonical_field": "Invoice",
-    "confidence": 0.85,
+    "canonical_field": "Payment",
     "sample_values": [
       "4500.0",
       "12000.0",
@@ -42,7 +38,6 @@
   {
     "source_column": "assigned_to",
     "canonical_field": "Task",
-    "confidence": 0.85,
     "sample_values": [
       "Ahmad Rizal",
       "Priya Nair",
@@ -51,12 +46,29 @@
   },
   {
     "source_column": "supplier_name",
-    "canonical_field": "Supplier",
-    "confidence": 0.95,
+    "canonical_field": "Vendor",
     "sample_values": [
       "BuildPro Supplies",
       "CoolTech Parts",
       "BuildPro Supplies"
+    ]
+  },
+  {
+    "source_column": "description",
+    "canonical_field": "Task",
+    "sample_values": [
+      "Aircon servicing",
+      "Chiller maintenance",
+      "Filter replacement"
+    ]
+  },
+  {
+    "source_column": " VendorID",
+    "canonical_field": "VendorID",
+    "sample_values": [
+      " S1234",
+      " S1235",
+      " S1236"
     ]
   }
 ]

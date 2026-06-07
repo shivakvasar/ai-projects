@@ -34,14 +34,14 @@ ANTHROPIC_API_KEY=your_api_key_here
 - `main()` — CLI entry point; parses args, runs mapping, prints results, and saves the JSON output.
 
 **System prompt**
-The script defines a strict system prompt (see `ingest.py`) that enumerates the accepted canonical fields (for example: `Customer`, `Job`, `Invoice`, `Payment`, `Task`, `Vendor`, `Supplier`, `SupplierID`, `Unknown`). The model is instructed to return ONLY a JSON array with these keys for each column:
+The script defines a strict system prompt (see `ingest.py`) that enumerates the accepted canonical fields (for example: `Customer`, `Job`, `Invoice`, `Payment`, `Task`, `Vendor`, `VendorID`, `Unknown`). The model is instructed to return ONLY a JSON array with these keys for each column:
 
 - `source_column` (string)
 - `canonical_field` (string)
 - `confidence` (float 0.0–1.0)
 - `sample_values` (array)
 
-If you add new column types (for example `SupplierID`), include them in that canonical fields list so the model can map correctly.
+If you add new column types, include them in that canonical fields list so the model can map correctly.
 
 **Usage**
 
@@ -72,13 +72,20 @@ python ingest.py data/invoices.xlsx --output data/invoices.mapped.json
 
 `mapper_agent.py` is a second mapping utility that uses an agent loop and tool-calling style with Claude.
 
-- `load_csv_headers(filepath)` / `load_xlsx_headers(filepath)` — reads up to 5 rows from the input file, extracts column headers, and returns up to 3 sample values per column.
-- `map_to_canonical_fields(headers, samples)` — sends the headers and samples to Claude with a strict prompt asking for a JSON array of mappings.
+- `load_headers(filepath)` — reads up to 5 rows from the input file, extracts column headers, and returns up to 3 sample values per column.
+- `inspect_column(header, sample_values)` — returns the current column data so Claude can reason about the mapping in the next turn.
 - `save_mappings(filepath, mappings)` — writes the mapping results to a JSON file.
 - `process_tool_call(tool_name, tool_input)` — executes the requested tool by name and returns the JSON result.
 - `agent_loop(user_message, max_iterations=10)` — drives the agent: sends the user request to Claude, handles tool calls from the model, executes them, and feeds results back until a final response is returned.
 
-The prompt instructs Claude to return only a valid JSON array with these fields for each source column:
+The agent supports relative file paths and will resolve them against the current working directory, the `BOSS` script directory, and the repo root.
+
+The prompt instructs Claude to use the following workflow:
+1. Call `load_headers()` once.
+2. Call `inspect_column()` for each column and decide the mapping.
+3. Call `save_mappings()` after all columns are mapped.
+
+The final output should be a JSON-style mapping with these fields for each source column:
 - `source_column`
 - `canonical_field`
 - `confidence`
