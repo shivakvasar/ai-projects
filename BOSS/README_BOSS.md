@@ -63,6 +63,16 @@ python ingest.py sample.csv --model claude-sonnet-4-5 --max-tokens 1024
 python ingest.py data/invoices.xlsx --output data/invoices.mapped.json
 ```
 
+**Testing**
+
+- Unit tests for `mapper_agent.py` live in `BOSS/tests/test_mapper.py`.
+- See `BOSS/tests/README.md` for the exact `pytest` commands.
+- Run from the repository root:
+
+```bash
+pytest -q BOSS/tests
+```
+
 **Notes & troubleshooting**
 - The mapper only recognizes fields listed in the system prompt; if a column is classified as `Unknown`, consider expanding the canonical field list.
 - The script reads only the first few rows to infer types — make sure the sample rows include representative values (e.g., supplier IDs like `S1234`).
