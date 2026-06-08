@@ -72,6 +72,7 @@ python ingest.py data/invoices.xlsx --output data/invoices.mapped.json
 ```bash
 pytest -q BOSS/tests
 ```
+- If you are using GitHub Actions, add `ANTHROPIC_API_KEY` as a repository secret under Settings → Secrets and variables → Actions.
 
 **Notes & troubleshooting**
 - The mapper only recognizes fields listed in the system prompt; if a column is classified as `Unknown`, consider expanding the canonical field list.

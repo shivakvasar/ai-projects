@@ -119,3 +119,54 @@ def test_process_tool_call_unknown_tool_returns_error():
     assert "success" not in result
     assert "error" in result
     assert "Unknown tool" in result["error"]
+
+
+def test_process_tool_call_load_headers_can_read_temp_csv():
+    """process_tool_call should load headers from a temporary CSV file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_file = Path(tmpdir) / "input.csv"
+        input_file.write_text("col1,col2\n1,2\n3,4\n", encoding="utf-8")
+
+        result = json.loads(
+            mapper_agent.process_tool_call(
+                "load_headers",
+                {"filepath": str(input_file)},
+            )
+        )
+
+    assert result["success"] is True
+    assert result["headers"] == ["col1", "col2"]
+    assert result["samples"]["col1"][:2] == ["1", "3"]
+
+
+def test_process_tool_call_save_mappings_writes_json():
+    """process_tool_call should persist mappings when save_mappings is invoked."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target_file = Path(tmpdir) / "mappings.json"
+        mappings = [
+            {
+                "source_column": "client_name",
+                "canonical_field": "Customer",
+                "confidence": 0.95,
+                "sample_values": ["Alice Co."],
+            }
+        ]
+
+        result = json.loads(
+            mapper_agent.process_tool_call(
+                "save_mappings",
+                {"filepath": str(target_file), "mappings": mappings},
+            )
+        )
+
+        assert result["success"] is True
+        assert target_file.exists()
+        assert json.loads(target_file.read_text(encoding="utf-8")) == mappings
+
+
+def test_resolve_filepath_finds_repo_relative_file():
+    """_resolve_filepath should locate files relative to the repo root."""
+    result = mapper_agent._resolve_filepath("sample.csv")
+
+    assert result.exists()
+    assert result.name == "sample.csv"
