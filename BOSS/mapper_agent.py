@@ -2,42 +2,43 @@
 
 import json
 import os
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import anthropic
 from dotenv import load_dotenv
 
-# Load environment variables from the .env file in the project root.
-# This makes values like ANTHROPIC_API_KEY available through os.getenv().
 load_dotenv()
 
-# Create a global Anthropic Claude client once, using the API key from the env.
-# All subsequent calls in this script reuse this client.
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-# System prompt for the agent loop. This keeps Claude aligned to the header mapping workflow
-# and the canonical fields we expect.
 SYSTEM_PROMPT = """You are a data mapper. Use the available tools to load CSV/XLSX headers,
 inspect individual columns, and save a final JSON mapping.
 
 Canonical fields: Customer, Job, Invoice, Payment, Task, Vendor, VendorID
 
+For columns that do not match any canonical field, use null as the canonical_field value
+and add a "notes" key explaining why it was not mapped.
+
 Workflow:
 1. Call load_headers() once to get all columns.
-2. For each column, call inspect_column() then decide the mapping.
+   - If the result includes "sheet_names", check whether the active_sheet is the correct
+     data sheet. Re-call load_headers with the right sheet_name if needed.
+   - If the result includes "duplicate_headers", note which columns were renamed.
+2. Call inspect_column() for each column. You may inspect multiple columns per turn.
 3. After all columns are mapped, call save_mappings().
 
 Only reason about mapping through the provided tools; do not act on data directly."""
 
-# Tool definitions exposed to the agent. Claude may request one of these tools by name.
-# Each tool includes a name, a description, and a JSON schema describing its input.
 TOOLS = [
     {
         "name": "load_headers",
         "description": (
             "Load column headers and sample values from a CSV or XLSX file. "
-            "Returns the first 3 sample values for each column."
+            "Returns the first 3 non-null sample values per column. "
+            "For XLSX files with multiple sheets, also returns sheet_names and active_sheet."
         ),
         "input_schema": {
             "type": "object",
@@ -45,7 +46,14 @@ TOOLS = [
                 "filepath": {
                     "type": "string",
                     "description": "Path to the input file to read",
-                }
+                },
+                "sheet_name": {
+                    "type": "string",
+                    "description": (
+                        "XLSX only: name or 0-based index of the sheet to read. "
+                        "Omit to use the first sheet."
+                    ),
+                },
             },
             "required": ["filepath"],
         },
@@ -92,6 +100,7 @@ TOOLS = [
     },
 ]
 
+
 def _resolve_filepath(filepath: str) -> Path:
     """Resolve a file path relative to cwd, the script directory, or the repo root."""
     candidate = Path(filepath).expanduser()
@@ -110,10 +119,107 @@ def _resolve_filepath(filepath: str) -> Path:
     return candidate
 
 
-# Read a file and extract the header names plus a few sample rows.
-# This tool supports both CSV and XLSX files, and resolves relative paths for
-# repo-root and script-relative file references.
-def load_headers(filepath: str) -> dict[str, Any]:
+# Encodings tried in order; utf-8-sig strips the BOM that Excel adds to UTF-8 exports.
+_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+
+def _read_raw_csv(path: Path, nrows: int) -> "pd.DataFrame":
+    """
+    Read a CSV with explicit delimiter probing and encoding fallback.
+    Tries comma, tab, semicolon, and pipe in order before falling back to a
+    single-column read. Uses Python's csv.reader to pre-count the maximum column
+    width across all rows so that pandas can NaN-pad shorter rows (e.g. metadata
+    rows that precede the real headers) instead of erroring on mismatched widths.
+    Returns a header=None DataFrame.
+    """
+    import csv as csvmod
+    import pandas as pd
+
+    last_err: Exception | None = None
+    for enc in _CSV_ENCODINGS:
+        try:
+            for sep in (",", "\t", ";", "|"):
+                # Count the widest row using Python's csv.reader (handles quoting).
+                max_cols = 0
+                try:
+                    with open(path, encoding=enc, newline="") as fh:
+                        for i, row in enumerate(csvmod.reader(fh, delimiter=sep)):
+                            if i >= nrows:
+                                break
+                            max_cols = max(max_cols, len(row))
+                except UnicodeDecodeError:
+                    raise
+                except Exception:
+                    continue
+
+                if max_cols < 2:
+                    continue
+
+                # Providing names= tells pandas exactly how many columns to expect,
+                # so rows narrower than max_cols are NaN-padded rather than rejected.
+                return pd.read_csv(
+                    path,
+                    header=None,
+                    names=list(range(max_cols)),
+                    nrows=nrows,
+                    encoding=enc,
+                    sep=sep,
+                )
+
+            # Fallback: single-column file or exotic delimiter
+            return pd.read_csv(path, header=None, nrows=nrows, encoding=enc)
+
+        except UnicodeDecodeError as e:
+            last_err = e
+    raise last_err  # type: ignore[misc]
+
+
+def _find_header_row(df_raw: "pd.DataFrame") -> int:
+    """
+    Scan the first few rows of a header=None DataFrame to locate the real header row.
+    Returns the index of the first row where >=50% of non-null cells are strings.
+    Falls back to 0 (no metadata rows detected) if no such row is found.
+    """
+    for i in range(min(5, len(df_raw))):
+        row = df_raw.iloc[i].dropna()
+        if len(row) < 2:
+            continue
+        if sum(1 for v in row if isinstance(v, str)) / len(row) >= 0.5:
+            return i
+    return 0
+
+
+def _df_from_raw(
+    df_raw: "pd.DataFrame", header_row: int
+) -> tuple["pd.DataFrame", list[str]]:
+    """
+    Build a DataFrame from a raw (header=None) DataFrame.
+
+    Returns (df, duplicate_originals) where duplicate_originals is the list of
+    column names that appeared more than once in the source header row.
+    Duplicate column names are suffixed with .1, .2, … to avoid collisions.
+    """
+    raw = [
+        str(v) if (v is not None and str(v).lower() != "nan") else ""
+        for v in df_raw.iloc[header_row].tolist()
+    ]
+
+    counts = Counter(raw)
+    duplicates = [h for h, c in counts.items() if c > 1 and h]
+
+    seen: dict[str, int] = {}
+    headers: list[str] = []
+    for h in raw:
+        n = seen.get(h, 0)
+        headers.append(f"{h}.{n}" if n > 0 else h)
+        seen[h] = n + 1
+
+    df = df_raw.iloc[header_row + 1 :].reset_index(drop=True)
+    df.columns = headers
+    return df, duplicates
+
+
+def load_headers(filepath: str, sheet_name: str | None = None) -> dict[str, Any]:
     """Read a CSV or Excel file and return column headers plus sample values."""
     try:
         import pandas as pd
@@ -125,27 +231,44 @@ def load_headers(filepath: str) -> dict[str, Any]:
                 "success": False,
             }
 
-        # Choose CSV versus Excel reading based on the file extension.
-        if resolved_path.suffix.lower() in (".xlsx", ".xls"):
-            df = pd.read_excel(resolved_path, nrows=5)
+        result_extra: dict[str, Any] = {}
+        is_excel = resolved_path.suffix.lower() in (".xlsx", ".xls", ".xlsm")
+
+        if is_excel:
+            xl = pd.ExcelFile(resolved_path)
+            all_sheets = xl.sheet_names
+            target = sheet_name if sheet_name is not None else all_sheets[0]
+            if len(all_sheets) > 1:
+                result_extra["sheet_names"] = all_sheets
+                result_extra["active_sheet"] = target
+
+            df_raw = pd.read_excel(
+                resolved_path, sheet_name=target, header=None, nrows=20
+            )
+            header_row = _find_header_row(df_raw)
+            df, duplicates = _df_from_raw(df_raw, header_row)
         else:
-            df = pd.read_csv(resolved_path, nrows=5)
+            df_raw = _read_raw_csv(resolved_path, nrows=20)
+            header_row = _find_header_row(df_raw)
+            df, duplicates = _df_from_raw(df_raw, header_row)
 
-        # The agent only needs the first few rows for header inference.
-        # This is faster and avoids loading large datasets into memory.
         headers = df.columns.tolist()
-        samples = {
-            col: df[col].dropna().astype(str).tolist()[:3] for col in headers
-        }
+        samples = {col: df[col].dropna().astype(str).tolist()[:3] for col in headers}
 
-        return {"headers": headers, "samples": samples, "success": True}
+        result: dict[str, Any] = {
+            "headers": headers,
+            "samples": samples,
+            "success": True,
+            **result_extra,
+        }
+        if duplicates:
+            result["duplicate_headers"] = duplicates
+        return result
+
     except Exception as e:
-        # If anything fails, return the error so the agent can continue gracefully.
         return {"error": str(e), "success": False}
 
-# Inspect a single header and its sample values and return the same data.
-# This keeps the mapping decision in the outer Claude agent loop instead of making
-# a second, nested Claude call inside the tool implementation.
+
 def inspect_column(header: str, sample_values: list[str]) -> dict[str, Any]:
     """Return a column header and its sample values for agent reasoning."""
     return {
@@ -154,39 +277,34 @@ def inspect_column(header: str, sample_values: list[str]) -> dict[str, Any]:
         "success": True,
     }
 
-# Save the final set of canonical mappings into a JSON file.
+
 def save_mappings(filepath: str, mappings: list) -> dict[str, Any]:
-    """Write the mapping results to a JSON file."""
+    """Write the mapping results to a JSON file, creating parent directories as needed."""
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        out_path = Path(filepath)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(mappings, f, indent=2)
-        return {
-            "success": True,
-            "message": f"Mappings saved to {filepath}",
-        }
+        return {"success": True, "message": f"Mappings saved to {filepath}"}
     except Exception as e:
-        # If writing fails, return the error instead of raising.
         return {"error": str(e), "success": False}
 
-# Route the tool request from Claude to the local Python helper function.
+
 def process_tool_call(tool_name: str, tool_input: dict) -> str:
     """Dispatch tool calls from the agent to the matching Python helper."""
     if tool_name == "load_headers":
-        result = load_headers(tool_input["filepath"])
+        result = load_headers(tool_input["filepath"], tool_input.get("sheet_name"))
     elif tool_name == "inspect_column":
-        result = inspect_column(
-            tool_input["header"], tool_input["sample_values"]
-        )
+        result = inspect_column(tool_input["header"], tool_input["sample_values"])
     elif tool_name == "save_mappings":
         result = save_mappings(tool_input["filepath"], tool_input["mappings"])
     else:
         result = {"error": f"Unknown tool: {tool_name}"}
 
-    # Always return a JSON string so the tool result can be fed back into the agent.
     return json.dumps(result)
 
-# Run the entire tool-calling agent loop until a final Claude response is returned.
-def agent_loop(user_message: str, max_iterations: int = 10) -> str:
+
+def agent_loop(user_message: str, max_iterations: int = 50) -> str:
     """
     Run the agentic loop with tool calling.
 
@@ -211,8 +329,6 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
         iteration += 1
         print(f"\n[Iteration {iteration}] Calling Claude...")
 
-        # Send the current conversation history, system prompt, and tool definitions to Claude.
-        # Claude may return a tool use block if it wants to call one of our tools.
         response = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=4096,
@@ -221,8 +337,6 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
             messages=messages,
         )
 
-        # Process any tool calls returned by Claude in the current response.
-        # Claude may request multiple tool invocations in a single response.
         tool_calls_made = False
         tool_results = []
 
@@ -236,7 +350,6 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
                 print(f"  → Tool call: {tool_name}")
                 print(f"    Input: {json.dumps(tool_input, indent=2)}")
 
-                # Execute the requested tool and serialize the result.
                 tool_result = process_tool_call(tool_name, tool_input)
                 print(f"    Result: {tool_result}")
 
@@ -249,29 +362,20 @@ def agent_loop(user_message: str, max_iterations: int = 10) -> str:
                 )
 
         if tool_results:
-            # Add the tool invocation message and the matching tool_result blocks.
             messages.append({"role": "assistant", "content": response.content})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": tool_results,
-                }
-            )
+            messages.append({"role": "user", "content": tool_results})
 
-        # If Claude did not request any tool, return its text output.
         if not tool_calls_made:
             for block in response.content:
                 if hasattr(block, "text"):
                     return block.text
             return ""
 
-    # If the loop reaches the maximum iteration count, return a safe fallback.
     return "Agent loop reached max iterations"
 
-# Demonstration entry point for running the agent with a fixed sample request.
+
 def main():
     """Demo entry point: run the agent loop with a sample request."""
-    # This demo request is intentionally simple: it asks the agent to use our tools.
     user_request = (
         "Load the file at BOSS/sample.csv, inspect each column with available tools, "
         "and save the mapping results to BOSS/sample.mapped.json"
