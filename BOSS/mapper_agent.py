@@ -13,6 +13,14 @@ load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+# Ordered tuple used in the system prompt and for canonical_field normalisation.
+CANONICAL_FIELDS = ("Customer", "Job", "Invoice", "Payment", "Task", "Vendor", "VendorID")
+_CANONICAL_LOWER: dict[str, str] = {f.lower(): f for f in CANONICAL_FIELDS}
+
+
+class AgentLoopError(RuntimeError):
+    """Raised when the agent loop exits without producing a final response."""
+
 SYSTEM_PROMPT = """You are a data mapper. Use the available tools to load CSV/XLSX headers,
 inspect individual columns, and save a final JSON mapping.
 
@@ -123,6 +131,14 @@ def _resolve_filepath(filepath: str) -> Path:
 # Encodings tried in order; utf-8-sig strips the BOM that Excel adds to UTF-8 exports.
 _CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 
+# Pandas' default NA strings with "nan"/"NaN" removed so a column literally named
+# "nan" is kept as the string "nan" rather than silently converted to float NaN.
+_CSV_NA_VALUES = frozenset({
+    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN",
+    "-NaN", "-nan", "1.#IND", "1.#QNAN", "<NA>",
+    "N/A", "NA", "NULL", "NaN", "None", "n/a", "null",
+})
+
 
 def _read_raw_csv(path: Path, nrows: int) -> "pd.DataFrame":
     """
@@ -158,6 +174,8 @@ def _read_raw_csv(path: Path, nrows: int) -> "pd.DataFrame":
 
                 # Providing names= tells pandas exactly how many columns to expect,
                 # so rows narrower than max_cols are NaN-padded rather than rejected.
+                # keep_default_na=False + na_values preserves the string "nan" as a
+                # column name instead of silently converting it to float NaN.
                 return pd.read_csv(
                     path,
                     header=None,
@@ -165,10 +183,15 @@ def _read_raw_csv(path: Path, nrows: int) -> "pd.DataFrame":
                     nrows=nrows,
                     encoding=enc,
                     sep=sep,
+                    na_values=_CSV_NA_VALUES,
+                    keep_default_na=False,
                 )
 
             # Fallback: single-column file or exotic delimiter
-            return pd.read_csv(path, header=None, nrows=nrows, encoding=enc)
+            return pd.read_csv(
+                path, header=None, nrows=nrows, encoding=enc,
+                na_values=_CSV_NA_VALUES, keep_default_na=False,
+            )
 
         except UnicodeDecodeError as e:
             last_err = e
@@ -201,20 +224,26 @@ def _find_header_row(df_raw: "pd.DataFrame") -> int:
 def _header_str(v: Any) -> str:
     """
     Convert a single header-row cell to a clean string.
-    Handles None/NaN → "", and whole-number floats (e.g. 2023.0 from XLSX) → "2023".
+    - None / float NaN → "" (absent or merged cell)
+    - Whole-number float → integer string (2023.0 → "2023")
+    - str → returned unchanged, including the literal text "nan"
+    - Other non-float scalars (numpy types, pd.NA) → str(), mapping "<NA>" to ""
     """
     if v is None:
         return ""
     if isinstance(v, float):
-        if v != v:  # NaN
+        if v != v:  # NaN check (NaN is the only value not equal to itself)
             return ""
         try:
             i = int(v)
             return str(i) if v == i else str(v)
         except (OverflowError, ValueError):
             return str(v)
+    if isinstance(v, str):
+        return v  # preserve as-is, including the literal string "nan"
+    # Handles numpy integers, booleans, pd.NA, etc.
     s = str(v)
-    return "" if s.lower() == "nan" else s
+    return "" if s.lower() in ("nan", "<na>") else s
 
 
 def _df_from_raw(
@@ -306,17 +335,40 @@ def inspect_column(header: str, sample_values: list[str]) -> dict[str, Any]:
 
 
 def save_mappings(filepath: str, mappings: list) -> dict[str, Any]:
-    """Write the mapping results to a JSON file, creating parent directories as needed."""
+    """
+    Write the mapping results to a JSON file, creating parent directories as needed.
+    Normalises canonical_field casing (e.g. "customer" → "Customer") and returns a
+    warning for any values not in CANONICAL_FIELDS.
+    """
     try:
         out_path = Path(filepath)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        unknown: list[str] = []
+        normalised: list[Any] = []
+        for entry in mappings:
+            if isinstance(entry, dict):
+                entry = dict(entry)  # shallow copy — don't mutate the caller's list
+                cf = entry.get("canonical_field")
+                if cf is not None:
+                    canonical = _CANONICAL_LOWER.get(str(cf).lower())
+                    if canonical is not None:
+                        entry["canonical_field"] = canonical
+                    else:
+                        unknown.append(str(cf))
+            normalised.append(entry)
+
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(mappings, f, indent=2)
-        return {
+            json.dump(normalised, f, indent=2)
+
+        result: dict[str, Any] = {
             "success": True,
             "message": f"Mappings saved to {filepath}",
-            "entries_written": len(mappings),
+            "entries_written": len(normalised),
         }
+        if unknown:
+            result["warnings"] = [f"Unrecognised canonical_field values (not in CANONICAL_FIELDS): {unknown}"]
+        return result
     except Exception as e:
         return {"error": str(e), "success": False}
 
@@ -402,7 +454,9 @@ def agent_loop(user_message: str, max_iterations: int = 50) -> str:
                     return block.text
             return ""
 
-    return "Agent loop reached max iterations"
+    raise AgentLoopError(
+        f"Agent loop did not produce a final response within {max_iterations} iterations."
+    )
 
 
 def main():
@@ -417,7 +471,11 @@ def main():
     print("=" * 70)
     print(f"\nUser Request: {user_request}\n")
 
-    final_response = agent_loop(user_request)
+    try:
+        final_response = agent_loop(user_request)
+    except AgentLoopError as e:
+        print(f"\nERROR: {e}")
+        return
 
     print("\n" + "=" * 70)
     print("FINAL RESPONSE:")

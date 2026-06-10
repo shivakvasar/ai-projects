@@ -413,3 +413,94 @@ def test_save_mappings_returns_entries_written():
 
         assert result["success"] is True
         assert result["entries_written"] == 2
+
+
+# --- Fix #1: "nan" string column names ---
+
+
+def test_header_str_preserves_literal_nan_string():
+    """_header_str must NOT filter the string 'nan' — only true float/None NaN."""
+    assert mapper_agent._header_str("nan") == "nan"
+    assert mapper_agent._header_str("NaN") == "NaN"
+    assert mapper_agent._header_str(float("nan")) == ""
+    assert mapper_agent._header_str(None) == ""
+
+
+def test_load_headers_nan_column_name():
+    """A column literally named 'nan' should appear in headers unchanged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        f = Path(tmpdir) / "test.csv"
+        f.write_text("customer,nan,amount\nAlice,cat1,100\nBob,cat2,200\n", encoding="utf-8")
+
+        result = mapper_agent.load_headers(str(f))
+
+        assert result["success"] is True
+        assert "nan" in result["headers"]
+        assert result["samples"]["nan"] == ["cat1", "cat2"]
+
+
+# --- Fix #4: AgentLoopError on timeout ---
+
+
+def test_agent_loop_raises_on_max_iterations():
+    """agent_loop should raise AgentLoopError rather than returning a magic string."""
+    with pytest.raises(mapper_agent.AgentLoopError):
+        mapper_agent.agent_loop("dummy request", max_iterations=0)
+
+
+# --- Fix #5: canonical_field normalisation ---
+
+
+def test_save_mappings_normalizes_canonical_field_casing():
+    """save_mappings should fix wrong casing (e.g. 'customer' → 'Customer')."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "out.json"
+        mappings = [
+            {"source_column": "client", "canonical_field": "customer"},
+            {"source_column": "ref", "canonical_field": "VENDORID"},
+        ]
+
+        result = mapper_agent.save_mappings(str(target), mappings)
+
+        assert result["success"] is True
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        assert saved[0]["canonical_field"] == "Customer"
+        assert saved[1]["canonical_field"] == "VendorID"
+        assert "warnings" not in result
+
+
+def test_save_mappings_warns_on_unknown_canonical_field():
+    """save_mappings should include a warnings key for values outside CANONICAL_FIELDS."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "out.json"
+        mappings = [{"source_column": "account_no", "canonical_field": "Account"}]
+
+        result = mapper_agent.save_mappings(str(target), mappings)
+
+        assert result["success"] is True
+        assert "warnings" in result
+        assert "Account" in result["warnings"][0]
+
+
+def test_save_mappings_null_canonical_field_is_valid():
+    """null canonical_field (intentionally unmapped column) should not produce a warning."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "out.json"
+        mappings = [{"source_column": "notes", "canonical_field": None, "notes": "free text"}]
+
+        result = mapper_agent.save_mappings(str(target), mappings)
+
+        assert result["success"] is True
+        assert "warnings" not in result
+
+
+def test_save_mappings_does_not_mutate_input():
+    """save_mappings should not modify the caller's mappings list in place."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "out.json"
+        original = {"source_column": "client", "canonical_field": "customer"}
+        mappings = [original]
+
+        mapper_agent.save_mappings(str(target), mappings)
+
+        assert original["canonical_field"] == "customer"  # unchanged
