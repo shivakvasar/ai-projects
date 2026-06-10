@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,9 @@ Workflow:
      data sheet. Re-call load_headers with the right sheet_name if needed.
    - If the result includes "duplicate_headers", note which columns were renamed.
 2. Call inspect_column() for each column. You may inspect multiple columns per turn.
-3. After all columns are mapped, call save_mappings().
+3. After all columns are mapped, call save_mappings(). Check that entries_written in
+   the response equals the number of headers from load_headers. If it is less, map the
+   remaining columns and call save_mappings again with the complete list.
 
 Only reason about mapping through the provided tools; do not act on data directly."""
 
@@ -177,16 +178,43 @@ def _read_raw_csv(path: Path, nrows: int) -> "pd.DataFrame":
 def _find_header_row(df_raw: "pd.DataFrame") -> int:
     """
     Scan the first few rows of a header=None DataFrame to locate the real header row.
-    Returns the index of the first row where >=50% of non-null cells are strings.
-    Falls back to 0 (no metadata rows detected) if no such row is found.
+
+    Primary signal: first row where >=50% of non-null cells are strings (catches text
+    headers and skips numeric-only data rows).
+
+    Fallback: if no string-dominated row is found (e.g. all-numeric column names such
+    as year ranges), return the first non-sparse row — i.e. the first row that has at
+    least 2 non-null cells, which is the row that follows any single-cell metadata rows.
     """
+    first_non_sparse: int | None = None
     for i in range(min(5, len(df_raw))):
         row = df_raw.iloc[i].dropna()
         if len(row) < 2:
             continue
         if sum(1 for v in row if isinstance(v, str)) / len(row) >= 0.5:
             return i
-    return 0
+        if first_non_sparse is None:
+            first_non_sparse = i
+    return first_non_sparse if first_non_sparse is not None else 0
+
+
+def _header_str(v: Any) -> str:
+    """
+    Convert a single header-row cell to a clean string.
+    Handles None/NaN → "", and whole-number floats (e.g. 2023.0 from XLSX) → "2023".
+    """
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        if v != v:  # NaN
+            return ""
+        try:
+            i = int(v)
+            return str(i) if v == i else str(v)
+        except (OverflowError, ValueError):
+            return str(v)
+    s = str(v)
+    return "" if s.lower() == "nan" else s
 
 
 def _df_from_raw(
@@ -199,10 +227,7 @@ def _df_from_raw(
     column names that appeared more than once in the source header row.
     Duplicate column names are suffixed with .1, .2, … to avoid collisions.
     """
-    raw = [
-        str(v) if (v is not None and str(v).lower() != "nan") else ""
-        for v in df_raw.iloc[header_row].tolist()
-    ]
+    raw = [_header_str(v) for v in df_raw.iloc[header_row].tolist()]
 
     counts = Counter(raw)
     duplicates = [h for h, c in counts.items() if c > 1 and h]
@@ -245,12 +270,14 @@ def load_headers(filepath: str, sheet_name: str | None = None) -> dict[str, Any]
             df_raw = pd.read_excel(
                 resolved_path, sheet_name=target, header=None, nrows=20
             )
-            header_row = _find_header_row(df_raw)
-            df, duplicates = _df_from_raw(df_raw, header_row)
         else:
             df_raw = _read_raw_csv(resolved_path, nrows=20)
-            header_row = _find_header_row(df_raw)
-            df, duplicates = _df_from_raw(df_raw, header_row)
+
+        if len(df_raw) == 0:
+            return {"error": "File contains no readable rows.", "success": False}
+
+        header_row = _find_header_row(df_raw)
+        df, duplicates = _df_from_raw(df_raw, header_row)
 
         headers = df.columns.tolist()
         samples = {col: df[col].dropna().astype(str).tolist()[:3] for col in headers}
@@ -285,7 +312,11 @@ def save_mappings(filepath: str, mappings: list) -> dict[str, Any]:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(mappings, f, indent=2)
-        return {"success": True, "message": f"Mappings saved to {filepath}"}
+        return {
+            "success": True,
+            "message": f"Mappings saved to {filepath}",
+            "entries_written": len(mappings),
+        }
     except Exception as e:
         return {"error": str(e), "success": False}
 

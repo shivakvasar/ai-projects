@@ -351,3 +351,65 @@ def test_process_tool_call_load_headers_passes_sheet_name():
 
         assert result["success"] is True
         assert "vendor" in result["headers"]
+
+
+def test_load_headers_empty_file_returns_error():
+    """load_headers should return a failure payload for a completely empty file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        f = Path(tmpdir) / "empty.csv"
+        f.write_text("", encoding="utf-8")
+
+        result = mapper_agent.load_headers(str(f))
+
+        assert result["success"] is False
+        assert "error" in result
+
+
+def test_load_headers_header_only_returns_empty_samples():
+    """A file with only a header row and no data rows should succeed with empty samples."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        f = Path(tmpdir) / "headers_only.csv"
+        f.write_text("customer,invoice,amount\n", encoding="utf-8")
+
+        result = mapper_agent.load_headers(str(f))
+
+        assert result["success"] is True
+        assert result["headers"] == ["customer", "invoice", "amount"]
+        assert result["samples"]["customer"] == []
+
+
+def test_load_headers_xlsx_numeric_headers_after_metadata_row():
+    """load_headers should find numeric column names (e.g. years) that follow a sparse metadata row."""
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "numeric_headers.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Q1 Sales Report"])   # sparse metadata row
+        ws.append([2022, 2023, 2024])    # numeric header row
+        ws.append([100, 200, 300])       # data
+        ws.append([150, 250, 350])       # data
+        wb.save(path)
+
+        result = mapper_agent.load_headers(str(path))
+
+        assert result["success"] is True
+        assert result["headers"] == ["2022", "2023", "2024"]
+        assert result["samples"]["2022"] == ["100", "150"]
+
+
+def test_save_mappings_returns_entries_written():
+    """save_mappings should include entries_written in the result so Claude can verify coverage."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target_file = Path(tmpdir) / "mappings.json"
+        mappings = [
+            {"source_column": "client_name", "canonical_field": "Customer"},
+            {"source_column": "job_ref", "canonical_field": "Job"},
+        ]
+
+        result = mapper_agent.save_mappings(str(target_file), mappings)
+
+        assert result["success"] is True
+        assert result["entries_written"] == 2
