@@ -1,4 +1,4 @@
-(# Ingest: CSV/XLSX Header Mapper
+# Ingest: CSV/XLSX Header Mapper
 
 `ingest.py` maps CSV/XLSX column headers to canonical fields using the Claude API.
 
@@ -65,14 +65,13 @@ python ingest.py data/invoices.xlsx --output data/invoices.mapped.json
 
 **Testing**
 
-- Unit tests for `mapper_agent.py` live in `BOSS/tests/test_mapper.py`.
-- See `BOSS/tests/README.md` for the exact `pytest` commands.
-- Run from the repository root:
+Unit tests for `mapper_agent.py` live in `BOSS/tests/test_mapper.py` (see `BOSS/tests/README.md`). Run from the repository root:
 
 ```bash
 pytest -q BOSS/tests
 ```
-- If you are using GitHub Actions, add `ANTHROPIC_API_KEY` as a repository secret under Settings → Secrets and variables → Actions.
+
+If you are using GitHub Actions, add `ANTHROPIC_API_KEY` as a repository secret under Settings → Secrets and variables → Actions.
 
 **Notes & troubleshooting**
 - The mapper only recognizes fields listed in the system prompt; if a column is classified as `Unknown`, consider expanding the canonical field list.
@@ -81,31 +80,75 @@ pytest -q BOSS/tests
 
 **Additional tool: `mapper_agent.py`**
 
-`mapper_agent.py` is a second mapping utility that uses an agent loop and tool-calling style with Claude.
+`mapper_agent.py` is an agentic mapping utility that drives Claude through a tool-calling loop to map CSV/XLSX column headers to canonical fields.
 
-- `load_headers(filepath)` — reads up to 5 rows from the input file, extracts column headers, and returns up to 3 sample values per column.
-- `inspect_column(header, sample_values)` — returns the current column data so Claude can reason about the mapping in the next turn.
-- `save_mappings(filepath, mappings)` — writes the mapping results to a JSON file.
-- `process_tool_call(tool_name, tool_input)` — executes the requested tool by name and returns the JSON result.
-- `agent_loop(user_message, max_iterations=10)` — drives the agent: sends the user request to Claude, handles tool calls from the model, executes them, and feeds results back until a final response is returned.
+**Constants**
 
-The agent supports relative file paths and will resolve them against the current working directory, the `BOSS` script directory, and the repo root.
+```python
+CANONICAL_FIELDS = ("Customer", "Job", "Invoice", "Payment", "Task", "Vendor", "VendorID")
+```
 
-The prompt instructs Claude to use the following workflow:
-1. Call `load_headers()` once.
-2. Call `inspect_column()` for each column and decide the mapping.
-3. Call `save_mappings()` after all columns are mapped.
+The seven recognised canonical field names. `save_mappings` normalises incoming values against this tuple (case-insensitive).
 
-The final output should be a JSON-style mapping with these fields for each source column:
-- `source_column`
-- `canonical_field`
-- `confidence`
-- `sample_values`
+**Exceptions**
 
-This file is useful when you want a more agentic workflow instead of a single CLI mapper.
+- `AgentLoopError(RuntimeError)` — raised by `agent_loop` if `max_iterations` is reached without a final text response from the model.
+
+**Functions**
+
+- `load_headers(filepath, sheet_name=None)` — reads up to 20 rows from a CSV or XLSX file, auto-detects the real header row (skipping title/metadata rows), and returns up to 3 non-null sample values per column.
+  - **Encoding fallback**: tries `utf-8-sig` → `utf-8` → `cp1252` → `latin-1`; `utf-8-sig` strips the BOM that Excel adds to UTF-8 CSVs.
+  - **Delimiter probing**: tests `,`, `\t`, `;`, `|` in order; uses `csv.reader` pre-scan + `names=` to NaN-pad rows narrower than the widest row, preventing `ParserError` on files with metadata rows.
+  - **NA handling**: uses a custom `na_values` list that omits `"nan"`/`"NaN"`, so a column literally named `nan` is preserved as a string.
+  - **Header row detection**: picks the first row where ≥50% of non-null cells are strings; falls back to the first non-sparse row for all-numeric headers (e.g. year ranges).
+  - **Duplicate column names**: detected and renamed with `.1`, `.2`, … suffixes; originals listed in `duplicate_headers`.
+  - **XLSX multi-sheet**: if the file has more than one sheet, returns `sheet_names` and `active_sheet`; re-call with `sheet_name=` to switch sheets.
+  - Returns `{"success": False, "error": "..."}` for missing files or completely empty files.
+
+- `inspect_column(header, sample_values)` — echoes a single column header and its sample values back as a JSON dict so the agent can reason about the mapping in the next turn.
+
+- `save_mappings(filepath, mappings)` — writes mappings to a JSON file; creates parent directories as needed.
+  - Normalises `canonical_field` casing (e.g. `"customer"` → `"Customer"`).
+  - `null` canonical_field values (intentionally unmapped columns) are written as-is with no warning.
+  - Returns `entries_written` (integer) so the agent can verify complete coverage.
+  - Returns `warnings` for any `canonical_field` values not in `CANONICAL_FIELDS`.
+
+- `process_tool_call(tool_name, tool_input)` — dispatches tool calls from the agent loop to the matching Python helper and returns the JSON result string.
+
+- `agent_loop(user_message, max_iterations=50)` — drives the agentic loop: sends the user request to Claude, handles tool calls, feeds results back, and repeats until a final text response is returned. Raises `AgentLoopError` if `max_iterations` is reached.
+
+The agent supports relative file paths and resolves them against the current working directory, the `BOSS` script directory, and the repo root.
+
+**Agent workflow**
+
+The system prompt instructs Claude to follow this sequence:
+1. Call `load_headers()` once. If `sheet_names` is present, verify the active sheet and re-call with `sheet_name=` if needed. Note any `duplicate_headers`.
+2. Call `inspect_column()` for each column (multiple calls per turn are allowed).
+3. Call `save_mappings()`. Verify `entries_written` equals the header count; re-call if any columns were missed.
+
+**Output schema per column**
+
+```json
+{
+  "source_column": "client_name",
+  "canonical_field": "Customer",
+  "confidence": 0.95,
+  "sample_values": ["Tan Brothers Pte Ltd", "City Mall Management"]
+}
+```
+
+Columns that do not match any canonical field should use `null` for `canonical_field` and include a `"notes"` key explaining why.
+
+**Testing**
+
+33 unit tests covering the tool helpers, edge-case file formats, and the `AgentLoopError` path. No live Claude API calls are made during the test suite.
+
+```bash
+pytest -q BOSS/tests
+```
 
 **See also**
-- `ingest.py` source: [BOSS/ingest.py](BOSS/ingest.py#L1-L201)
+- `ingest.py` source: [BOSS/ingest.py](BOSS/ingest.py)
 - `mapper_agent.py` source: [BOSS/mapper_agent.py](BOSS/mapper_agent.py)
 
 
