@@ -26,6 +26,12 @@ inspect individual columns, and save a final JSON mapping.
 
 Canonical fields: Customer, Job, Invoice, Payment, Task, Vendor, VendorID
 
+Each mapping object passed to save_mappings MUST include:
+- source_column: the original column name
+- canonical_field: the matched canonical field, or null if unmatched
+- confidence: a float between 0 and 1 representing your certainty
+- reasoning: a brief explanation of why this mapping was chosen
+
 For columns that do not match any canonical field, use null as the canonical_field value
 and add a "notes" key explaining why it was not mapped.
 
@@ -102,6 +108,27 @@ TOOLS = [
                 "mappings": {
                     "type": "array",
                     "description": "List of mapping objects",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_column": {
+                                "type": "string",
+                                "description": "Original column name from the source file",
+                            },
+                            "canonical_field": {
+                                "description": "Matched canonical field name, or null if unmatched",
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "description": "Confidence score between 0 and 1",
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": "Brief explanation of why this mapping was chosen",
+                            },
+                        },
+                        "required": ["source_column", "canonical_field", "confidence", "reasoning"],
+                    },
                 },
             },
             "required": ["filepath", "mappings"],
