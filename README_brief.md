@@ -36,3 +36,13 @@ If `--format json` is selected, it prints the full JSON response instead.
 ## Notes
 - The script expects the API response to be valid JSON wrapped with optional markdown code fences.
 - If you want to change the model or output filename, update the `MODEL` or `OUTPUT_FILENAME` constants in `brief.py`.
+
+## Development Setup
+
+After cloning, activate the pre-commit hook so pytest runs before every commit:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+This tells git to use the tracked `.githooks/` directory instead of `.git/hooks/`. The hook runs `pytest BOSS/tests/ -v` and blocks the commit if any test fails.

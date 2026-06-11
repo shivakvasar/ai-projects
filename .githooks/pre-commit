@@ -1,0 +1,35 @@
+#!/bin/sh
+echo "Running pytest before commit..."
+
+# Activate virtualenv if one exists (project-local first, then home venv)
+for VENV_DIR in .venv venv env "$HOME/venv" "$HOME/.venv"; do
+    if [ -f "$VENV_DIR/bin/activate" ]; then
+        . "$VENV_DIR/bin/activate"
+        break
+    fi
+done
+
+# Locate pytest
+if command -v pytest >/dev/null 2>&1; then
+    PYTEST_CMD="pytest"
+elif command -v python3 >/dev/null 2>&1 && python3 -m pytest --version >/dev/null 2>&1; then
+    PYTEST_CMD="python3 -m pytest"
+else
+    echo "WARNING: pytest not found — skipping tests."
+    echo "Install it with: pip install pytest"
+    exit 0
+fi
+
+$PYTEST_CMD BOSS/tests/ -v
+STATUS=$?
+
+if [ $STATUS -ne 0 ]; then
+    echo ""
+    echo "ERROR: Tests failed. Commit blocked."
+    echo "Fix the failing tests and try again."
+    exit 1
+fi
+
+echo ""
+echo "All tests passed. Proceeding with commit."
+exit 0
