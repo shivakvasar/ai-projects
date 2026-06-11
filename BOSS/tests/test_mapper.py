@@ -504,3 +504,45 @@ def test_save_mappings_does_not_mutate_input():
         mapper_agent.save_mappings(str(target), mappings)
 
         assert original["canonical_field"] == "customer"  # unchanged
+
+
+# --- Fix #7: confidence field preserved in saved output ---
+
+
+def test_save_mappings_preserves_confidence_field():
+    """save_mappings must include confidence in every saved mapping object."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "out.json"
+        mappings = [
+            {
+                "source_column": "client_name",
+                "canonical_field": "Customer",
+                "confidence": 0.97,
+                "reasoning": "Direct name match",
+            },
+            {
+                "source_column": "ref_no",
+                "canonical_field": "Job",
+                "confidence": 0.85,
+                "reasoning": "Likely a job reference number",
+            },
+        ]
+
+        result = mapper_agent.save_mappings(str(target), mappings)
+
+        assert result["success"] is True
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        for item in saved:
+            assert "confidence" in item, f"confidence missing from {item}"
+        assert saved[0]["confidence"] == 0.97
+        assert saved[1]["confidence"] == 0.85
+
+
+def test_save_mappings_tool_schema_requires_confidence():
+    """The save_mappings tool schema must define confidence as a required item field."""
+    schema = next(t for t in mapper_agent.TOOLS if t["name"] == "save_mappings")
+    items = schema["input_schema"]["properties"]["mappings"]["items"]
+    assert "confidence" in items["properties"], "confidence not in items.properties"
+    assert "confidence" in items["required"], "confidence not in items.required"
+    assert "reasoning" in items["properties"], "reasoning not in items.properties"
+    assert "reasoning" in items["required"], "reasoning not in items.required"
