@@ -1,0 +1,58 @@
+[
+  {
+    "source_column": "client_name",
+    "canonical_field": "Customer",
+    "confidence": 0.95,
+    "sample_values": [
+      "Northside Logistics"
+    ]
+  },
+  {
+    "source_column": "job_ref",
+    "canonical_field": "Job",
+    "confidence": 0.95,
+    "sample_values": [
+      "JOB-0100"
+    ]
+  },
+  {
+    "source_column": "date_issued",
+    "canonical_field": "Invoice",
+    "confidence": 0.7,
+    "sample_values": [
+      "2026-07-28"
+    ]
+  },
+  {
+    "source_column": "amount_due",
+    "canonical_field": "Invoice",
+    "confidence": 0.85,
+    "sample_values": [
+      "2200.0"
+    ]
+  },
+  {
+    "source_column": "assigned_to",
+    "canonical_field": "Task",
+    "confidence": 0.75,
+    "sample_values": [
+      "Farah Idris"
+    ]
+  },
+  {
+    "source_column": "supplier_name",
+    "canonical_field": "Vendor",
+    "confidence": 0.95,
+    "sample_values": [
+      "SteelWorks Ltd"
+    ]
+  },
+  {
+    "source_column": "description",
+    "canonical_field": "Task",
+    "confidence": 0.8,
+    "sample_values": [
+      "Loading dock repair"
+    ]
+  }
+]
