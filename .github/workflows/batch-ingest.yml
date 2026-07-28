@@ -1,0 +1,80 @@
+name: Batch Importer
+
+# Runs whenever a push adds/changes a file under incoming/ — e.g. dropping a
+# new CSV export there and pushing it. `paths:` is a filter: GitHub still
+# fires this workflow's push event for every push to master, but skips
+# actually running the job unless at least one changed file matches.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'incoming/**'
+
+# Needed so the "Commit mapped JSON to data/" step below can push back to
+# the repo (the default GITHUB_TOKEN is read-only otherwise).
+permissions:
+  contents: write
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # fetch-depth: 2 pulls this commit AND the one before it (default
+      # checkout only grabs the latest commit) — the "Find new files" step
+      # below needs the previous commit to diff against, to figure out
+      # which file(s) under incoming/ this specific push actually added.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      # `git diff --name-only HEAD~1 HEAD -- incoming/` lists every file
+      # under incoming/ that changed in this push (there can be more than
+      # one, e.g. if several CSVs are pushed together). The grep keeps only
+      # spreadsheet files, in case a stray .gitkeep or README lands in
+      # incoming/ too. The `<<EOF ... EOF` block is GitHub Actions' way of
+      # passing a *multi-line* value out of a step via $GITHUB_OUTPUT.
+      - name: Find new/changed files under incoming/
+        id: changed
+        run: |
+          FILES=$(git diff --name-only HEAD~1 HEAD -- incoming/ | grep -E '\.(csv|xlsx|xls)$' || true)
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      # BOSS/ingest.py normally writes its output next to the input file
+      # (foo.csv -> foo.mapped.json); --output overrides that so results
+      # land in data/ instead, one mapped JSON per file that changed.
+      - name: Map each file and save to data/
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p data
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            name=$(basename "$file")
+            stem="${name%.*}"
+            python BOSS/ingest.py "$file" --output "data/${stem}.mapped.json"
+          done <<< "${{ steps.changed.outputs.files }}"
+
+      # `git diff --cached --quiet || git commit` only commits if mapping
+      # actually produced new/changed output — reruns won't create empty
+      # commits.
+      - name: Commit mapped JSON to data/
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "chore: batch-ingest mapped output $(date +'%Y-%m-%d')"
+          git push
