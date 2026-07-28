@@ -13,9 +13,15 @@ jobs:
   test:
     name: Run tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
-    # Expose the Anthropic API key to the job via GitHub Secrets. Add the
-    # secret at: Settings → Secrets and variables → Actions → New repository secret
+    # Exposed for future tests that actually call Claude. The current suite
+    # (BOSS/tests/test_mapper.py) never calls the API — its own docstring
+    # says so — and constructing anthropic.Anthropic() doesn't validate the
+    # key, so this isn't required for CI to pass today. Left wired up so
+    # nothing breaks the moment an integration test needs a real key; remove
+    # if that never materializes. Add the secret at: Settings → Secrets and
+    # variables → Actions → New repository secret
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
@@ -24,24 +30,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2) Set up Python. Use the modern setup action and pin a tested version.
+      # 2) Set up Python, pin a tested version, and let setup-python handle
+      #    pip caching itself (cache: 'pip' hashes **/requirements.txt for
+      #    the cache key, same as a hand-rolled actions/cache step would).
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      # 3) Cache pip's download/wheel cache directory to speed up repeated runs.
-      #    The cache key uses a hash of `requirements.txt` so the cache is
-      #    invalidated automatically when dependencies change.
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      # 4) Upgrade pip, then install project dependencies from `requirements.txt`.
+      # 3) Upgrade pip, then install project dependencies from `requirements.txt`.
       #    Installing from a requirements file keeps CI consistent with local dev.
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
@@ -49,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      # 5) Run the test suite. Adjust the path if you add more tests later.
+      # 4) Run the test suite. Adjust the path if you add more tests later.
       - name: Run tests
         run: pytest -q BOSS/tests
 
