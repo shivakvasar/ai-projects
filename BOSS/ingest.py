@@ -2,11 +2,17 @@
 # Each "import" line pulls in a library so we can use its functions below.
 
 import anthropic            # The official Claude API client.
-import pandas as pd         # Library for working with tables (CSV / Excel). The "as pd" lets us type "pd" instead of "pandas".
 import json                 # Built-in library for reading/writing JSON text.
 import argparse             # Built-in library for parsing command-line arguments (e.g. --model foo).
+import sys                  # Used below to make the sibling mapper_agent import work.
 from pathlib import Path    # "Path" is a modern way to handle file paths (better than plain strings).
 from dotenv import load_dotenv  # Loads variables from a .env file into the environment (so the API key isn't hard-coded).
+
+# mapper_agent.py sits next to this file in BOSS/. Adding that directory to the
+# import path keeps `import mapper_agent` working whether this file is run as a
+# script from the repo root (`python BOSS/ingest.py`) or loaded by path in tests.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mapper_agent         # Shared CSV/XLSX readers — see load_headers() below.
 
 # Run load_dotenv() right at startup so anthropic.Anthropic() below can find ANTHROPIC_API_KEY.
 load_dotenv()
@@ -34,43 +40,38 @@ Return ONLY a JSON array. No explanation. Each item must have:
 
 # --- Functions -------------------------------------------------------------
 
+# Extensions we accept. mapper_agent's reader would happily try to parse anything
+# else as delimited text, so the CLI keeps an explicit allow-list to fail loudly
+# on e.g. a .txt or .pdf handed to it by mistake.
+SUPPORTED_SUFFIXES = (".csv", ".xlsx", ".xls", ".xlsm")
+
+
 def load_headers(filepath: str) -> tuple[list[str], dict]:
     """Read headers and sample values from CSV or XLSX.
 
-    The "filepath: str" syntax is a type hint — it tells readers (and tools) that
-    filepath should be a string. The "-> tuple[...]" hint describes the return type.
-    Type hints don't change behavior; they're documentation Python can check.
+    Delegates to mapper_agent.load_headers so the CLI (and the batch-ingest
+    workflow that calls it) get the same readers as the agent tool path:
+    header-row detection for files with title/metadata rows, encoding fallback
+    for BOM/cp1252/latin-1 exports, and delimiter probing for ; tab and | files.
+
+    mapper_agent.load_headers reports failure as {"success": False, "error": ...}
+    because it is a model-facing tool; this wrapper converts that back into an
+    exception so the CLI exits non-zero instead of writing a bad mapping file.
     """
     # Path(filepath).suffix grabs the file extension (e.g. ".CSV").
     # .lower() makes it lowercase so ".CSV" and ".csv" both work.
     suffix = Path(filepath).suffix.lower()
-
-    # Pick the right pandas reader based on the extension.
-    # nrows=5 says "only read the first 5 rows" — we don't need the whole file
-    # just to look at column names and a few sample values.
-    if suffix in (".xlsx", ".xls"):
-        df = pd.read_excel(filepath, nrows=5)
-    elif suffix == ".csv":
-        df = pd.read_csv(filepath, nrows=5)
-    else:
+    if suffix not in SUPPORTED_SUFFIXES:
         # "raise" stops execution and reports an error. !r prints the value with quotes
         # around it, so the user sees: Unsupported file extension: '.txt'
         raise ValueError(f"Unsupported file extension: {suffix!r}")
 
-    # df.columns is the list of column names. .tolist() converts it to a plain Python list.
-    headers = df.columns.tolist()
-
-    # This is a "dict comprehension" — a compact way to build a dictionary.
-    # For each column name `col`, the value is:
-    #   df[col]          -> the column (a pandas Series)
-    #   .dropna()        -> drop empty/NaN cells
-    #   .astype(str)     -> convert each value to a string
-    #   .tolist()[:3]    -> turn into a list, then take the first 3 items
-    # Result: {"FirstName": ["Alice", "Bob", "Carol"], "Amount": ["100", "250", "75"], ...}
-    samples = {col: df[col].dropna().astype(str).tolist()[:3] for col in headers}
+    result = mapper_agent.load_headers(filepath)
+    if not result.get("success"):
+        raise ValueError(result.get("error", f"Could not read headers from {filepath!r}"))
 
     # Return BOTH values as a tuple. The caller unpacks with: headers, samples = load_headers(...)
-    return headers, samples
+    return result["headers"], result["samples"]
 
 
 def parse_mappings(raw: str) -> list[dict]:
@@ -151,12 +152,24 @@ def print_mappings(mappings: list[dict]):
     print("-" * 65)  # Multiplying a string by N repeats it N times — handy for separator lines.
 
     for m in mappings:
-        # "█" * int(m["confidence"] * 10) -> a visual bar.
-        # If confidence is 0.7, that's 0.7 * 10 = 7.0, int() truncates to 7, so "███████".
-        confidence_bar = "█" * int(m["confidence"] * 10)
+        # canonical_field is null for a column the model could not match to any
+        # canonical field — that's a valid result, not an error, so render it as
+        # "unmapped" rather than letting None reach the format spec.
+        canonical = m.get("canonical_field") or "unmapped"
 
-        # {m['confidence']:.2f} -> format as a float with 2 decimal places (e.g. 0.73).
-        print(f"{m['source_column']:<30} {m['canonical_field']:<18} {m['confidence']:.2f} {confidence_bar}")
+        # confidence is optional too: BOSS/sample.mapped.json omits it entirely.
+        confidence = m.get("confidence")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            # "█" * int(confidence * 10) -> a visual bar. If confidence is 0.7,
+            # that's 0.7 * 10 = 7.0, int() truncates to 7, so "███████".
+            confidence_bar = "█" * int(confidence * 10)
+            # :.2f -> format as a float with 2 decimal places (e.g. 0.73).
+            confidence_text = f"{confidence:.2f}"
+        else:
+            confidence_bar = ""
+            confidence_text = "n/a"
+
+        print(f"{m.get('source_column', ''):<30} {canonical:<18} {confidence_text:<4} {confidence_bar}")
     print()  # Blank line at the end.
 
 

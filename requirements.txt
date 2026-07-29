@@ -2,3 +2,7 @@ anthropic>=0.12.0
 pandas>=2.0.0
 python-dotenv>=1.0.0
 pytest>=7.0.0
+# Required by pandas.read_excel / pd.ExcelFile for .xlsx and .xlsm input.
+# Without it the XLSX tests importorskip themselves, so CI reports green on
+# code that would fail at runtime.
+openpyxl>=3.1.0

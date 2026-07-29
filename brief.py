@@ -17,11 +17,19 @@ OUTPUT_FILENAME = "brief_output.json"
 
 #Functions
 def clean_response(response_text):
-    startswith = "```json"
-    endswith = "```"
-    if response_text.startswith(startswith) and response_text.endswith(endswith):
-        return response_text[len(startswith):-len(endswith)].strip()
-    return response_text.strip()
+    """Strip a markdown code fence from a model response, if present.
+
+    Strips before testing for the fence so a trailing newline doesn't defeat the
+    closing-fence check, and matches a bare ``` opener as well as ```json.
+    """
+    text = response_text.strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (```json, ```JSON, or a bare ```).
+        text = text.split("\n", 1)[1] if "\n" in text else text[len("```"):]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[: -len("```")]
+        text = text.strip()
+    return text
 
 def save_output(data, filename):
     with open(filename, 'w', encoding='utf-8') as f:
@@ -96,9 +104,6 @@ response_text = clean_response(response_text)
 parsed = json.loads(response_text)
 
 # Print the results
-print("Summary:", parsed["summary"])
-print("Risks:", parsed["risks"])
-print("Actions:", parsed["actions"])
 print_output(parsed, args.format)
 
 # Save the output to a JSON file
