@@ -1,6 +1,10 @@
 # BOSS Tests
 
-This folder contains unit tests for the BOSS mapping utilities.
+This folder contains unit tests for the BOSS mapping utilities:
+
+- `test_mapper.py` — the agent tool layer in `mapper_agent.py`
+- `test_ingest.py` — the `ingest.py` CLI used by the batch-ingest workflow
+- `test_exception_alert.py` — the exception-alert helper
 
 ## Install test dependencies
 

@@ -65,7 +65,7 @@ python ingest.py data/invoices.xlsx --output data/invoices.mapped.json
 
 **Testing**
 
-Unit tests for `mapper_agent.py` live in `BOSS/tests/test_mapper.py` (see `BOSS/tests/README.md`). Run from the repository root:
+Unit tests live in `BOSS/tests/` — `test_mapper.py` for `mapper_agent.py` and `test_ingest.py` for `ingest.py` (see `BOSS/tests/README.md`). Run from the repository root:
 
 ```bash
 pytest -q BOSS/tests
@@ -141,7 +141,7 @@ Columns that do not match any canonical field should use `null` for `canonical_f
 
 **Testing**
 
-33 unit tests covering the tool helpers, edge-case file formats, and the `AgentLoopError` path. No live Claude API calls are made during the test suite.
+66 unit tests covering the tool helpers, edge-case file formats, the `ingest.py` CLI readers and reporting, and the `AgentLoopError` path. No live Claude API calls are made during the test suite.
 
 ```bash
 pytest -q BOSS/tests

@@ -47,11 +47,20 @@ jobs:
 
       # Runs the anomaly check and writes the structured alert to alerts/latest.json
       # so it can also be uploaded as a build artifact below.
+      #
+      # customer_name is free-text dispatch input, so it reaches the shell through
+      # an environment variable rather than a ${{ }} expression: ${{ }} is
+      # substituted before bash parses the script, which would let a quote in the
+      # input close the string and run arbitrary commands in a job holding the
+      # Anthropic API key. As "$CUSTOMER_NAME" it stays an ordinary argument.
       - name: Run exception check
+        env:
+          CUSTOMER_NAME: ${{ inputs.customer_name }}
+          ALERT_TYPE: ${{ inputs.alert_type }}
         run: |
           mkdir -p alerts
-          python BOSS/exception_alert.py "${{ inputs.customer_name }}" \
-            --alert-type "${{ inputs.alert_type }}" \
+          python BOSS/exception_alert.py "$CUSTOMER_NAME" \
+            --alert-type "$ALERT_TYPE" \
             --output alerts/latest.json
 
       # Renders the alert JSON straight into the workflow run's summary page, so
@@ -59,8 +68,11 @@ jobs:
       # the artifact.
       - name: Write job summary
         if: always()
+        env:
+          CUSTOMER_NAME: ${{ inputs.customer_name }}
+          ALERT_TYPE: ${{ inputs.alert_type }}
         run: |
-          echo "### Exception Alert: ${{ inputs.customer_name }} (${{ inputs.alert_type }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Exception Alert: $CUSTOMER_NAME ($ALERT_TYPE)" >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           cat alerts/latest.json >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -69,7 +81,9 @@ jobs:
       # (tr swaps anything that isn't a letter/digit/dash/underscore for "-").
       - name: Slugify customer name for artifact naming
         id: slug
-        run: echo "value=$(echo '${{ inputs.customer_name }}' | tr -c 'A-Za-z0-9_-' '-')" >> "$GITHUB_OUTPUT"
+        env:
+          CUSTOMER_NAME: ${{ inputs.customer_name }}
+        run: echo "value=$(printf '%s' "$CUSTOMER_NAME" | tr -c 'A-Za-z0-9_-' '-')" >> "$GITHUB_OUTPUT"
 
       - name: Upload alert artifact
         uses: actions/upload-artifact@v4
